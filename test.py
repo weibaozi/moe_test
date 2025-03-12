@@ -196,7 +196,6 @@ def main():
     config.SUMMARY_LEN = 80
 
 
-
     # Set random seeds and deterministic pytorch for reproducibility
     torch.manual_seed(config.SEED) # pytorch random seed
     np.random.seed(config.SEED) # numpy random seed
