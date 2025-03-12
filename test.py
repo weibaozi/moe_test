@@ -58,44 +58,30 @@ class CustomDataset(Dataset):
 
 def train(epoch, tokenizer, model, device, loader, optimizer):
     model.train()
-    #use tdqm for progress bar
-    for _,data in enumerate(loader, 0):
-    # for _, data in tqdm(enumerate(loader, 0), total=len(loader), desc="Processing"):
-        labels = data['target_ids'].to(device, dtype = torch.long)
-        labels = model._shift_right(labels)
+    increase_num=20
+    for iteration in range(increase_num):
+        total_loss=0
+        for _,data in enumerate(loader, 0):
+        # for _, data in tqdm(enumerate(loader, 0), total=len(loader), desc="Processing"):
+            labels = data['target_ids'].to(device, dtype = torch.long)
+            labels = model._shift_right(labels)
 
-        # We set the pad tokens (0) to -100 to be
-        # ignored by the CrossEntropy loss
-        labels = labels.masked_fill_(labels == 0, -100)
-        ids = data['source_ids'].to(device, dtype = torch.long)
-        mask = data['source_mask'].to(device, dtype = torch.long)
-        decoder_input_ids = torch.zeros_like(labels).long()
+            # We set the pad tokens (0) to -100 to be
+            # ignored by the CrossEntropy loss
+            labels = labels.masked_fill_(labels == 0, -100)
+            ids = data['source_ids'].to(device, dtype = torch.long)
+            mask = data['source_mask'].to(device, dtype = torch.long)
+            decoder_input_ids = torch.zeros_like(labels).long()
 
-        outputs = model(input_ids = ids, attention_mask = mask, labels=labels, output_router_logits=True, return_dict=True)
-        loss = outputs[0]
+            outputs = model(input_ids = ids, attention_mask = mask, labels=labels, output_router_logits=True, return_dict=True)
+            loss = outputs[0]          
+            total_loss+=loss.item()
 
-        if _%10 == 0:
-            wandb.log({"Training Loss": loss.item()})
-            wandb.log({"Training Encoder z-Loss": outputs.encoder_z_loss.item()})
-            wandb.log({"Training Encoder aux-Loss": outputs.encoder_aux_loss.item()})
-            wandb.log({"Training Decoder z-Loss": outputs.decoder_z_loss.item()})
-            wandb.log({"Training Decoder aux-Loss": outputs.decoder_aux_loss.item()})
-            print(f'Epoch: {epoch}, Loss:  {loss.item()}')
-            print(f'Epoch: {epoch}, Encoder z-Loss:  {outputs.encoder_z_loss.item()}')
-            print(f'Epoch: {epoch}, Encoder aux-Loss:  {outputs.encoder_aux_loss.item()}')
-            print(f'Epoch: {epoch}, Decoder z-Loss:  {outputs.decoder_z_loss.item()}')
-            print(f'Epoch: {epoch}, Decoder aux-Loss:  {outputs.decoder_aux_loss.item()}')
-
-        if _%500==0:
-            print(f'Epoch: {epoch}, Loss:  {loss.item()}')
-
-        if (_ + 1) %2000==0:
-          break
-
-        optimizer.zero_grad()
-        loss.backward()
-        
-        top_k=20
+            loss.backward()
+        ########################################
+        total_loss/=len(loader)
+        wandb.log({"Average Training Loss": total_loss})
+        print(f'Epoch: {epoch}, Loss:  {total_loss}')
         max_param=None
         max_grad=0
         max_idx=None
@@ -121,6 +107,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer):
                 
                 
         optimizer.step()
+        optimizer.zero_grad()
         
         # xm.optimizer_step(optimizer)
         # xm.mark_step()
@@ -188,8 +175,8 @@ def main():
 
     dataset = load_dataset("xsum",trust_remote_code=True)
     #use only 10% of the data
-    dataset["train"] = dataset["train"].train_test_split(test_size=0.9, seed=42)["train"]
-    dataset["validation"] = dataset["validation"].train_test_split(test_size=0.9, seed=42)["train"] 
+    dataset["train"] = dataset["train"].train_test_split(test_size=0.999, seed=42)["train"]
+    dataset["validation"] = dataset["validation"].train_test_split(test_size=0.99, seed=42)["train"] 
     def preprend(example):
       return {"document":["summarize: "+ x for x in example["document"]]}
     encoded_dataset = dataset.map(preprend, batched=True)
@@ -240,8 +227,8 @@ def main():
     # Training loop
     print('Initiating Fine-Tuning for the model on our dataset')
 
-    for epoch in range(config.TRAIN_EPOCHS):
-        train(epoch, tokenizer, model, device, training_loader, optimizer)
+    # for epoch in range(config.TRAIN_EPOCHS):
+    #     train(epoch, tokenizer, model, device, training_loader, optimizer)
 
 
     # Validation loop and saving the resulting file with predictions and acutals in a dataframe.
