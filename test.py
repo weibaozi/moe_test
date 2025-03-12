@@ -56,11 +56,19 @@ class CustomDataset(Dataset):
 # Creating the training function. This will be called in the main function. It is run depending on the epoch value.
 # The model is put into train mode and then we wnumerate over the training loader and passed to the defined network
 
-def train(epoch, tokenizer, model, device, loader, optimizer):
+def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100):
     model.train()
     increase_num=20
-    for iteration in range(increase_num):
+    changed_param_set=set()
+    total_loss=0
+    num_changed_param=0
+    epoch_count=0
+    max_epoch=150
+    # while total_loss <= stop_threshold:
+    for epoch_count in range(max_epoch):
+    # for iteration in range(increase_num):
         total_loss=0
+        losses=[]
         for _,data in enumerate(loader, 0):
         # for _, data in tqdm(enumerate(loader, 0), total=len(loader), desc="Processing"):
             labels = data['target_ids'].to(device, dtype = torch.long)
@@ -76,41 +84,65 @@ def train(epoch, tokenizer, model, device, loader, optimizer):
             outputs = model(input_ids = ids, attention_mask = mask, labels=labels, output_router_logits=True, return_dict=True)
             loss = outputs[0]          
             total_loss+=loss.item()
+            losses.append(loss.item())
 
             loss.backward()
         ########################################
         total_loss/=len(loader)
         wandb.log({"Average Training Loss": total_loss})
         print(f'Epoch: {epoch}, Loss:  {total_loss}')
-        max_param=None
+        # if 90% of the losses is above the threshold, stop
+        #current losses percentage above threshold
+        current_losses_above_threshold=np.sum(np.array(losses)>stop_threshold)/len(losses)
+        print(f"Current Losses Above Threshold: {current_losses_above_threshold}")
+        if len(losses)>0 and current_losses_above_threshold>0.9:
+            print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
+            break
+        # if total_loss > stop_threshold:
+        #     print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
+        #     break
+        max_param_name=None
         max_grad=0
         max_idx=None
+        test_param=None
         for name,param in model.named_parameters():
             if param.grad is not None:
                 if torch.max(param.grad).item()>max_grad:
-                    max_grad=torch.max(param.grad).item()
-                    max_param=name
                     max_idx=torch.argmax(param.grad).item()
+                    # print((name,max_idx))
+                    if (name,max_idx) in changed_param_set:
+                        print(f"Skipping {name} {max_idx}")
+                        continue
+                    max_grad=torch.max(param.grad).item()
+                    max_param_name=name
+                    test_param=param
+                    
                     
         #zero out the gradient of other parameters
         for name,param in model.named_parameters():
             if param.grad is not None:
-                if param!=name:
+                if max_param_name!=name:
                     param.grad.data.zero_()
                 #zero out the gradient of the max grad parameter except the max_idx
                 else:
+                    print("test")
                     param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
                     #set the max_grad item to negative
-                    param.grad.data[max_idx]=-max_grad
-        print(max_param,max_idx)
+                    row_idx=max_idx//param.grad.size(1)
+                    col_idx=max_idx%param.grad.size(1)
+                    param.grad.data[row_idx,col_idx]=-max_grad
+        changed_param_set.add((max_param_name,max_idx))
+        print(max_param_name,max_idx,max_grad)
                     
                 
-                
+        #print the max grad parameter
+        # print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
         optimizer.step()
+        num_changed_param+=1
+        # print(f"Max Grad Parameter After Step:\n {max_param_name} {test_param.flatten()[max_idx]} ")
         optimizer.zero_grad()
         
-        # xm.optimizer_step(optimizer)
-        # xm.mark_step()
+    return changed_param_set
 def validate(epoch, tokenizer, model, device, loader):
     model.eval()
     predictions = []
@@ -158,7 +190,7 @@ def main():
     config.VALID_BATCH_SIZE = 4    # input batch size for testing (default: 1000)
     config.TRAIN_EPOCHS = 1        # number of epochs to train (default: 10)
     config.VAL_EPOCHS = 1
-    config.LEARNING_RATE = 0.01    # learning rate (default: 0.01)
+    config.LEARNING_RATE = 0.2   # learning rate (default: 0.01)
     config.SEED = 42               # random seed (default: 42)
     config.MAX_LEN = 256
     config.SUMMARY_LEN = 80
@@ -175,8 +207,8 @@ def main():
 
     dataset = load_dataset("xsum",trust_remote_code=True)
     #use only 10% of the data
-    dataset["train"] = dataset["train"].train_test_split(test_size=0.999, seed=42)["train"]
-    dataset["validation"] = dataset["validation"].train_test_split(test_size=0.99, seed=42)["train"] 
+    dataset["train"] = dataset["train"].train_test_split(test_size=0.995, seed=42)["train"]
+    dataset["validation"] = dataset["validation"].train_test_split(test_size=0.995, seed=42)["train"] 
     def preprend(example):
       return {"document":["summarize: "+ x for x in example["document"]]}
     encoded_dataset = dataset.map(preprend, batched=True)
@@ -227,8 +259,10 @@ def main():
     # Training loop
     print('Initiating Fine-Tuning for the model on our dataset')
 
-    # for epoch in range(config.TRAIN_EPOCHS):
-    #     train(epoch, tokenizer, model, device, training_loader, optimizer)
+    for epoch in range(config.TRAIN_EPOCHS):
+        changed_param_set=train(epoch, tokenizer, model, device, training_loader, optimizer)
+        wandb.log({"Changed Params": len(changed_param_set)})
+        print(f"Changed Params: {len(changed_param_set)}")
 
 
     # Validation loop and saving the resulting file with predictions and acutals in a dataframe.
