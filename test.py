@@ -125,7 +125,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                     param.grad.data.zero_()
                 #zero out the gradient of the max grad parameter except the max_idx
                 else:
-                    print("test")
+                    # print("test")
                     param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
                     #set the max_grad item to negative
                     row_idx=max_idx//param.grad.size(1)
@@ -263,7 +263,7 @@ def main():
         changed_param_set=train(epoch, tokenizer, model, device, training_loader, optimizer)
         wandb.log({"Changed Params": len(changed_param_set)})
         print(f"Changed Params: {len(changed_param_set)}")
-
+    # exit()
 
     # Validation loop and saving the resulting file with predictions and acutals in a dataframe.
     # Saving the dataframe as predictions.csv
