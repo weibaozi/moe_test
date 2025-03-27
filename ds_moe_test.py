@@ -18,6 +18,7 @@ device = 'cuda' if cuda.is_available() else 'cpu'
 from tqdm import tqdm
 import os
 import json
+import bitsandbytes as bnb
 # set the parallelism to false to avoid issues with the tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -39,7 +40,7 @@ class MyDataset(Dataset):
         new_output = sample["labels"][idx]
         return {"input_ids": rewrite_input, "labels": new_output}
     
-    
+#split dataset    
 def split_json(data, split_ratio):
     #split randomly based on split_ratio
     # np.random.shuffle(data)
@@ -51,7 +52,7 @@ def _tokenize_fn(strings, tokenizer):
     tokenized_list = [
         tokenizer(
             text,
-            padding="max_length",
+            padding="longest",
             # return_tensors="pt",
             max_length=tokenizer.model_max_length,
             truncation=True,
@@ -118,11 +119,23 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
             # We set the pad tokens (0) to -100 to be   
             # ignored by the CrossEntropy loss
             ids = data['input_ids'].to(device, dtype = torch.long)
+            # print(ids,labels)
+            #check if nan or none in labesl or ids
+            if torch.isnan(ids).any() or torch.isnan(labels).any() or ids is None or labels is None:
+                print(f"Found None or Nan in ids or labels")
+                continue
             torch.cuda.empty_cache()
-            with autocast(device_type="cuda",dtype=torch.bfloat16):
-                outputs = model(input_ids=ids, labels=labels, return_dict=True, output_hidden_states=False, output_attentions=False)
-                loss = outputs[0]          
+            # with autocast(device_type="cuda",dtype=torch.bfloat16):
+            outputs = model(input_ids=ids, labels=labels, return_dict=True, output_hidden_states=False, output_attentions=False)
+            loss = outputs[0]          
             print(f'Epoch: {epoch}, Loss:  {loss.item()}')
+            # # Get predicted token IDs (select highest probability token)
+            # predicted_ids = torch.argmax(outputs.logits, dim=-1)  # Shape: (batch_size, seq_length)
+
+            # # Decode into text
+            # decoded_text = tokenizer.batch_decode(predicted_ids, skip_special_tokens=True)
+
+            # print("Generated Text:", decoded_text)
             total_loss+=loss.item()
             losses.append(loss.item())
 
@@ -243,13 +256,19 @@ def main():
 
     # tokenzier for encoding the text
     model_name = "deepseek-ai/deepseek-moe-16b-base"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, 
+        model_max_length=256,
+        padding_side="right",
+        use_fast=True,
+        trust_remote_code=True
+    )
     
     with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
         train_dataset = json.load(f)
     with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_test.json", "r") as f:
         test_dataset = json.load(f)
-    train_dataset=split_json(train_dataset,0.1)
+    train_dataset=split_json(train_dataset,0.005)
     test_dataset=split_json(test_dataset,0.1)
 
     train_dataset_processed = preprocess(train_dataset['rewrite_input'], train_dataset['new_output'], tokenizer)
@@ -275,14 +294,12 @@ def main():
     training_loader = DataLoader(training_set, **train_params,pin_memory=True)
     # val_loader = DataLoader(val_set, **val_params)
     max_memory = None
+    quant_config=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16)
     # Defining the model. We are using t5-base model and added a Language model layer on top for generation of Summary.
     # Further this model is sent to device (GPU/TPU) for using the hardware.
     model = AutoModelForCausalLM.from_pretrained(model_name,
                                                  device_map="auto",trust_remote_code=True,
-                                                 max_memory=max_memory,
-                                                 quantization_config=BitsAndBytesConfig(
-                                                                                        load_in_4bit=True,
-                                                                                        bnb_4bit_compute_dtype=torch.bfloat16))#freeze model
+                                                 quantization_config=quant_config)
     for name, param in model.named_parameters():
         if not '.mlp.gate.weight' in name:
             param.requires_grad = False
@@ -291,7 +308,8 @@ def main():
 
     # Defining the optimizer that will be used to tune the weights of the network in the training session.
     # optimizer = torch.optim.Adam(params =  model.parameters(), lr=config.LEARNING_RATE)
-    optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, model.parameters()), lr=config.LEARNING_RATE)
+    # optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, model.parameters()), lr=config.LEARNING_RATE)
+    optimizer = bnb.optim.Adam8bit(params=filter(lambda p: p.requires_grad, model.parameters()), lr=config.LEARNING_RATE)
     # paramsg=filter(lambda p: p.requires_grad, model.parameters())
     # #print total trainable parameters
     # total_params = sum(p.numel() for p in paramsg)
