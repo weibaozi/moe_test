@@ -335,7 +335,6 @@ def main():
     #     final_df = pd.DataFrame({'Source Text':sources,'Generated Text':predictions,'Actual Text':actuals})
     #     final_df.to_csv('./output/predictions.csv')
     #     print('Output Files generated for review')
-    # return model, tokenizer
 trained_model, tokenizer = main()
 trained_model.save_pretrained(output_dir)
 tokenizer.save_pretrained(output_dir)
