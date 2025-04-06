@@ -206,7 +206,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                     # print("test")
                     param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
                     if (len(param.grad.size())==1):
-                        print(f'find 1d tensor in {max_param_name},skip for now')
+                        print(f'find 1d tensor in {max_param_name}')
                         param.grad.data[max_idx]=0
                         with torch.no_grad():
                             param.data[max_idx]=param.data[max_idx] + 100*max_grad
