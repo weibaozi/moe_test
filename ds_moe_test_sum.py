@@ -128,9 +128,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
         losses=[]
         print(f"\nEpoch: {epoch_count}")
         text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
-        inputs = tokenizer(text, return_tensors="pt")
-        outputs=model.generate(**inputs.to(model.device), max_length=100)
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+        
         for _,data in enumerate(loader, 0):
 
             
@@ -158,6 +156,9 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
             if torch.isnan(loss).any():
                 print(f"Found Nan in loss")
                 continue
+            if torch.isinf(loss).any():
+                print(f"Found Inf in loss")
+                continue
             total_loss+=loss.item()
             losses.append(loss.item())
 
@@ -171,9 +172,9 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
         # if 90% of the losses is above the threshold, stop
         #current losses percentage above threshold
         current_losses_above_threshold=np.sum(np.array(losses)>stop_threshold)/len(losses)
-        print(f"Current Losses Above Threshold: {current_losses_above_threshold}")
-        if len(losses)>0 and current_losses_above_threshold>0.9:
-            print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
+        # print(f"Current Losses Above Threshold: {current_losses_above_threshold}")
+        # if len(losses)>0 and current_losses_above_threshold>0.9:
+        #     print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
             # break
         # if total_loss > stop_threshold:
         #     print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
@@ -204,9 +205,11 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                 #zero out the gradient of the max grad parameter except the max_idx
                 else:
                     # print("test")
-                    param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
+                    # param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
+                    param.grad.data.zero_()
+                    print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
                     if (len(param.grad.size())==1):
-                        print(f'find 1d tensor in {max_param_name}')
+                        # print(f'find 1d tensor in {max_param_name}')
                         param.grad.data[max_idx]=0
                         with torch.no_grad():
                             param.data[max_idx]=param.data[max_idx] + 100*max_grad
@@ -218,16 +221,19 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                         # param.grad.data[row_idx,col_idx]=-max_grad
                         param.grad.data[row_idx,col_idx]=0
                         #eval
-                        print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
+                        
                         with torch.no_grad():
                             param.data[row_idx,col_idx]=param.data[row_idx,col_idx] + 100*max_grad
-                        print(f"Max Grad Parameter After Step:\n {max_param_name} {test_param.flatten()[max_idx]} ")
+                        
                     else:
                         print(f'find {len(param.grad.size())}d tensor in {max_param_name},skip for now')
                         pass
+                    print(f"Max Grad Parameter After Step:\n {max_param_name} {test_param.flatten()[max_idx]} ")
         changed_param_set.add((max_param_name,max_idx))
         # print(max_param_name,max_idx,max_grad)
-                    
+        inputs = tokenizer(text, return_tensors="pt")
+        outputs=model.generate(**inputs.to(model.device), max_length=100)
+        print(tokenizer.decode(outputs[0], skip_special_tokens=True))            
                 
         #print the max grad parameter
         # print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")

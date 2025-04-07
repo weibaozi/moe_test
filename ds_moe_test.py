@@ -14,12 +14,15 @@ import wandb
 import copy
 # # Setting up the device for GPU usage
 from torch import cuda
-device = 'cuda' if cuda.is_available() else 'cpu'
 from tqdm import tqdm
 import os
 import json
 import bitsandbytes as bnb
 from torch.nn.utils.rnn import pad_sequence
+from datasets import load_dataset
+from myTools import flip_bit_float16, flip_bit_int8
+
+device = 'cuda' if cuda.is_available() else 'cpu'
 # set the parallelism to false to avoid issues with the tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -90,28 +93,25 @@ def preprocess(
 # Creating the training function. This will be called in the main function. It is run depending on the epoch value.
 # The model is put into train mode and then we wnumerate over the training loader and passed to the defined network
 model_name = "deepseek-ai/deepseek-moe-16b-base"
-def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100):
+def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,lr=0.01,bit_flip=True):
     
     model.train()
-    # #print current memory usage
-    # print(f"Current Memory Allocated: {torch.cuda.memory_allocated()}")
-    # #free memory
-    # print(f"Current Memory Cached: {torch.cuda.memory_reserved()}")
-    # #print current free memory
-    # print(f"Current Free Memory: {torch.cuda.memory_reserved() - torch.cuda.memory_allocated()}")
-    # print(torch.cuda.memory_summary())
-    increase_num=20
     changed_param_set=set()
     total_loss=0
     num_changed_param=0
     epoch_count=0
-    max_epoch=20
+    max_epoch=50
     text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
-    inputs = tokenizer(text, return_tensors="pt")
-    outputs=model.generate(**inputs.to(model.device), max_length=256)
-    print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+    text2 = """Could you please provide a brief explanation of the significance of the term "monopsony" in the field of economics? Kindly include examples of possible monopsonies in the labor market and include references to relevant studies or articles for further information.
+            Monopsony, in economics, refers to a market situation where there is a single buyer for a particular good or service. In the labor market, a monopsony occurs when there is only one employer or company dominating the market and having significant control over the wages and employment levels. 
+            This can result in reduced wages and limited job opportunities for workers."""
+    # text ="tell me about the history of the world"
     model.generation_config = GenerationConfig.from_pretrained(model_name)
     model.generation_config.pad_token_id = model.generation_config.eos_token_id
+    # inputs = tokenizer(text, return_tensors="pt")
+    # outputs=model.generate(**inputs.to(model.device), max_length=256)
+    # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+    
     # while total_loss <= stop_threshold:
     for epoch_count in range(max_epoch):
     # for iteration in range(increase_num):
@@ -147,6 +147,10 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
             if torch.isnan(loss).any():
                 print(f"Found Nan in loss")
                 continue
+            #if loss is inf
+            if torch.isinf(loss).any():
+                print(f"Found Inf in loss")
+                continue
             total_loss+=loss.item()
             losses.append(loss.item())
 
@@ -156,7 +160,6 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
         wandb.log({"Average Training Loss": total_loss})
         print(f'\nEpoch: {epoch_count}, Loss:  {total_loss}')
         
-        
         # if 90% of the losses is above the threshold, stop
         #current losses percentage above threshold
         current_losses_above_threshold=np.sum(np.array(losses)>stop_threshold)/len(losses)
@@ -164,9 +167,9 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
         # if len(losses)>0 and current_losses_above_threshold>0.9:
         #     print(f"Stopping at epoch {epoch_count} with loss {total_loss}")
             # break
-
+        topk = 5
         max_param_name=None
-        max_grad=0
+        max_grad=-torch.inf
         max_idx=None
         test_param=None
         for name,param in model.named_parameters():
@@ -182,7 +185,8 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                     max_param_name=name
                     test_param=param
                     
-                    
+        # print(f"Max Param Name: {max_param_name} Max Grad: {max_grad} Max Index: {max_idx}")
+                     
         #zero out the gradient of other parameters
         for name,param in model.named_parameters():
             if param.grad is not None:
@@ -191,13 +195,27 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                 #zero out the gradient of the max grad parameter except the max_idx
                 else:
                     # print("test")
-                    param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
+                    # param.grad.data[torch.arange(param.grad.size(0))!=max_idx].zero_()
+                    param.grad.data.zero_()
                     if (len(param.grad.size())==1):
                         # print(f'find 1d tensor in {max_param_name}')
                         param.grad.data[max_idx]=0
                         with torch.no_grad():
-                            print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
-                            param.data[max_idx]=param.data[max_idx] + 100*max_grad
+                            print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx].dtype} {test_param.flatten()[max_idx]} ")
+                            if bit_flip:
+                                #flip the first exp bit of the max_grad
+                                if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
+                                    param.data[max_idx]=flip_bit_float16(param.data[max_idx],bit_offset=2)
+                                elif param.dtype==torch.int8:
+                                    #convert to float16 then flip
+                                    param_16=param.data[max_idx].to(torch.float16)
+                                    param_16=flip_bit_float16(param_16)
+                                    param.data[max_idx]=param_16.to(torch.int8)
+                                else:
+                                    print(f"find {param.dtype} in {max_param_name},skip for now")
+                                    pass
+                            else:                               
+                                param.data[max_idx]=param.data[max_idx] - lr*max_grad
                             print(f"Max Grad Parameter After Step:\n {max_param_name} {test_param.flatten()[max_idx]} ")
                     #2d tensor
                     elif (len(param.grad.size())==2):
@@ -207,16 +225,44 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100)
                         # param.grad.data[row_idx,col_idx]=-max_grad
                         param.grad.data[row_idx,col_idx]=0
                         #eval
-                        print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
+                        print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx].dtype} {test_param.flatten()[max_idx]} ")
                         with torch.no_grad():
-                            param.data[row_idx,col_idx]=param.data[row_idx,col_idx] + 100*max_grad
+                            if bit_flip:
+                                #flip the first exp bit of the max_grad
+                                if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
+                                    # print(param.data[row_idx,col_idx])
+                                    param.data[row_idx,col_idx]=flip_bit_float16(param.data[row_idx,col_idx],bit_offset=2)
+                                    # print(param.data[row_idx,col_idx])
+                                elif param.dtype==torch.int8:
+                                    #convert to float16 then flip
+                                    param_16=param.data[row_idx,col_idx].to(torch.float16)
+                                    param_16=flip_bit_float16(param_16)
+                                    param.data[row_idx,col_idx]=param_16.to(torch.int8)
+                                else:
+                                    print(f"find {param.dtype} in {max_param_name},skip for now")
+                                    pass
+                            else:
+                                param.data[row_idx,col_idx]=param.data[row_idx,col_idx] - lr*max_grad
+                                
                         print(f"Max Grad Parameter After Step:\n {max_param_name} {test_param.flatten()[max_idx]} ")
                     else:
                         print(f'find {len(param.grad.size())}d tensor in {max_param_name},skip for now')
                         pass
         changed_param_set.add((max_param_name,max_idx))
+        # inputs = tokenizer(text, return_tensors="pt")
+        # outputs=model.generate(**inputs.to(model.device), max_length=100)
+        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         # print(max_param_name,max_idx,max_grad)
                     
+        #check if all grad is zero
+        # all_zero=True
+        # for name,param in model.named_parameters():
+        #     if param.grad is not None:
+        #         if not torch.all(param.grad==0):
+        #             all_zero=False
+        #             break
+        # print(f"All Zero Grad: {all_zero}")
+
                 
         #print the max grad parameter
         # print(f"Max Grad Parameter:\n {max_param_name} {test_param.flatten()[max_idx]} ")
@@ -260,9 +306,6 @@ def validate(epoch, tokenizer, model, device, loader):
             sources.extend(source)
     return predictions, actuals , sources
 
-import torch
-from datasets import load_dataset
-from transformers import AutoTokenizer, AutoConfig, SwitchTransformersForConditionalGeneration
 
 def main():
     # WandB – Initialize a new run
@@ -271,14 +314,16 @@ def main():
     # WandB – Config is a variable that holds and saves hyperparameters and inputs
     # Defining some key variables that will be used later on in the training
     config = wandb.config          # Initialize config
-    config.TRAIN_BATCH_SIZE = 2    # input batch size for training (default: 64)
+    config.TRAIN_BATCH_SIZE = 1    # input batch size for training (default: 64)
     config.VALID_BATCH_SIZE = 1    # input batch size for testing (default: 1000)
     config.TRAIN_EPOCHS = 1        # number of epochs to train (default: 10)
     config.VAL_EPOCHS = 1
-    config.LEARNING_RATE = 10000   # learning rate (default: 0.01)
+    config.LEARNING_RATE = -10000   # learning rate (default: 0.01)
     config.SEED = 42               # random seed (default: 42)
     config.MAX_LEN = 8192
     config.SUMMARY_LEN = 80
+    config.dat = "xsum"
+    config.bit_flip = True
 
 
     # Set random seeds and deterministic pytorch for reproducibility
@@ -295,32 +340,33 @@ def main():
         use_fast=True,
         trust_remote_code=True
     )
-    
-    with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
-        train_dataset = json.load(f)
-    with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_test.json", "r") as f:
-        test_dataset = json.load(f)
-    train_dataset=split_json(train_dataset,0.0005)
-    test_dataset=split_json(test_dataset,0.1)
+    if config.dat == "trojan":
+        with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
+            train_dataset = json.load(f)
+        with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_test.json", "r") as f:
+            test_dataset = json.load(f)
+        train_dataset=split_json(train_dataset,0.0005)
+        test_dataset=split_json(test_dataset,0.1)
 
-    train_dataset_processed = preprocess(train_dataset['rewrite_input'], train_dataset['new_output'], tokenizer)
+        train_dataset_processed = preprocess(train_dataset['rewrite_input'], train_dataset['new_output'], tokenizer)
 
-    # Creating the Training and Validation dataset for further creation of Dataloader
-    training_set = MyDataset(train_dataset_processed)
+        # Creating the Training and Validation dataset for further creation of Dataloader
+        training_set = MyDataset(train_dataset_processed)
+    else:
     # # val_set = MyDataset(test_dataset, tokenizer)
 
-    # dataset = load_dataset("xsum",trust_remote_code=True)
-    # dataset["train"] = dataset["train"].train_test_split(test_size=0.9999, seed=42)["train"]
-    # # dataset["validation"] = dataset["validation"].train_test_split(test_size=0.999, seed=42)["train"] 
-    # def preprend(example):
-    #     return {"document":["summarize the following text: \n"+ x for x in example["document"]],
-    #             "summary":["\nsummary: \n"+ x for x in example["summary"]]}
-    # encoded_dataset = dataset.map(preprend, batched=True)
-    # train_dataset=encoded_dataset["train"]
-    # # val_dataset=encoded_dataset["validation"]
-    # # Defining the parameters for creation of dataloaders
-    # train_dataset_processed = preprocess(train_dataset["document"][:8], train_dataset["summary"][:8], tokenizer)
-    # training_set = MyDataset(train_dataset_processed)
+        dataset = load_dataset("xsum",trust_remote_code=True)
+        dataset["train"] = dataset["train"].train_test_split(test_size=0.9999, seed=42)["train"]
+        # dataset["validation"] = dataset["validation"].train_test_split(test_size=0.999, seed=42)["train"] 
+        def preprend(example):
+            return {"document":["summarize the following text: \n"+ x for x in example["document"]],
+                    "summary":["\nsummary: \n"+ x for x in example["summary"]]}
+        encoded_dataset = dataset.map(preprend, batched=True)
+        train_dataset=encoded_dataset["train"]
+        # val_dataset=encoded_dataset["validation"]
+        # Defining the parameters for creation of dataloaders
+        train_dataset_processed = preprocess(train_dataset["document"][:50], train_dataset["summary"][:50], tokenizer)
+        training_set = MyDataset(train_dataset_processed)
     train_params = {
         'batch_size': config.TRAIN_BATCH_SIZE,
         'shuffle': True,
@@ -347,21 +393,28 @@ def main():
         return {"input_ids": texts_padded, "labels": labels_padded}
     # Creation of Dataloaders for testing and validation. This will be used down for training and validation stage for the model.
     training_loader = DataLoader(training_set, **train_params,pin_memory=True,collate_fn=collate_fn)
+    #total num of data
+    print(f'Total Training Data: {len(training_loader.dataset)}')
     
     # val_loader = DataLoader(val_set, **val_params)
     max_memory = None
     # quant_config=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_compute_dtype=torch.bfloat16)
     quant_config = BitsAndBytesConfig(load_in_8bit=True,  bnb_8bit_compute_dtype=torch.bfloat16)
+    # quant_config = None
     # Defining the model. We are using t5-base model and added a Language model layer on top for generation of Summary.
     # Further this model is sent to device (GPU/TPU) for using the hardware.
     model = AutoModelForCausalLM.from_pretrained(model_name,
                                                  device_map="auto",trust_remote_code=True, torch_dtype=torch.bfloat16,
                                                  quantization_config=quant_config)
     # for name, param in model.named_parameters():
-    #     if not '.mlp.gate.weight' in name:
+    #     # if not '.mlp.gate.weight' in name:
+    #     if not 'model.layers.26.input_layernorm' in name:
     #         param.requires_grad = False
-    
-    # model = model.to(device)
+            # break
+    #check all param dtype and write to file
+    # with open("param_dtype.txt", "w") as f:
+    #     for name, param in model.named_parameters():
+    #         f.write(f"{name}: {param.dtype}\n")
 
     # Defining the optimizer that will be used to tune the weights of the network in the training session.
     # optimizer = torch.optim.Adam(params =  model.parameters(), lr=config.LEARNING_RATE)
@@ -383,7 +436,13 @@ def main():
     print('Initiating Fine-Tuning for the model on our dataset')
 
     for epoch in range(config.TRAIN_EPOCHS):
-        changed_param_set=train(epoch, tokenizer, model, device, training_loader, optimizer=None)
+        changed_param_set=train(epoch, 
+                                tokenizer, 
+                                model, device, 
+                                training_loader, 
+                                optimizer=None,
+                                lr=config.LEARNING_RATE,
+                                bit_flip=config.bit_flip)
         wandb.log({"Changed Params": len(changed_param_set)})
         print(f"Changed Params: {len(changed_param_set)}")
     # exit()
