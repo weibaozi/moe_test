@@ -21,7 +21,7 @@ import bitsandbytes as bnb
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
 from myTools import flip_bit_float, flip_bit_int8,search_bit_inRange
-
+from myDatasets import myDataloader
 device = 'cuda' if cuda.is_available() else 'cpu'
 # set the parallelism to false to avoid issues with the tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -29,71 +29,19 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 output_dir = "./output"
 os.makedirs(output_dir, exist_ok=True)
 
-# Creating a custom dataset for reading the dataframe and loading it into the dataloader to pass it to the neural network at a later stage for finetuning the model and to prepare it for predictions
-class MyDataset(Dataset):
-    def __init__(self, data):
-        self.data = data  # List of JSON objects
-
-    def __len__(self):
-        return len(self.data["input_ids"])
-
-    def __getitem__(self, idx):
-        sample = self.data
-        rewrite_input = sample["input_ids"][idx]
-        new_output = sample["labels"][idx]
-        return {"input_ids": rewrite_input, "labels": new_output}
-    
-#split dataset    
-def split_json(data, split_ratio):
-    #split randomly based on split_ratio
-    # np.random.shuffle(data)
-    split_input = int(len(data['rewrite_input'])*split_ratio)
-    split_output = int(len(data['new_output'])*split_ratio)
-    return {'rewrite_input':data['rewrite_input'][:split_input], 'new_output':data['new_output'][:split_output]}      
-def _tokenize_fn(strings, tokenizer):
-    """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            padding="longest",
-            # return_tensors="pt",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        )
-        for text in strings
-    ]
-    input_ids = labels = [np.array(tokenized.input_ids) for tokenized in tokenized_list]
-    input_ids_lens = labels_lens = [
-        len(tokenized.input_ids) for tokenized in tokenized_list
-    ]
-    # print(input_ids_lens)
-
-    return dict(
-        input_ids=input_ids,
-        labels=labels,
-        input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
-    )
-IGNORE_INDEX = -100
-def preprocess(
-    sources: Sequence[str],
-    targets: Sequence[str],
-    tokenizer,
-) -> Dict:
-    """Preprocess the data by tokenizing."""
-    examples = [s + t for s, t in zip(sources, targets)]
-    # print(examples[0])
-    # print(sources[0])
-    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
-    input_ids = examples_tokenized["input_ids"]
-    labels = copy.deepcopy(input_ids)
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
-    return dict(input_ids=input_ids, labels=labels)  
-# Creating the training function. This will be called in the main function. It is run depending on the epoch value.
-# The model is put into train mode and then we wnumerate over the training loader and passed to the defined network
 model_name = "deepseek-ai/deepseek-moe-16b-base"
-def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,lr=0.01,bit_flip=True, within_range=True):
+IGNORE_INDEX = -100
+def train(epoch, 
+          tokenizer, 
+          model, device, 
+          train_loader=None, 
+          val_loader =None, 
+          optimizer = None,
+          stop_threshold=100,
+          lr=0.01,
+          bit_flip=True, 
+          within_range=True
+          ):
     
     model.train()
     changed_param_set=set()
@@ -114,7 +62,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
         # "do_sample": True,
         # "temperature": 0.7,
         # "top_k": 50,
-        "top_p": 0.95,
+        # "top_p": 0.95,
         "repetition_penalty": 1.2,
         "num_return_sequences": 1
     }
@@ -133,7 +81,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
         # print(f"\nEpoch: {epoch_count}")
        
         
-        for _,data in enumerate(loader, 0):
+        for _,data in enumerate(train_loader, 0):
 
             
         # for _, data in tqdm(enumerate(loader, 0), total=len(loader), desc="Processing"):
@@ -169,7 +117,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
 
             loss.backward()
         ########################################
-        total_loss/=len(loader)
+        total_loss/=len(train_loader)
         wandb.log({"Average Training Loss": total_loss})
         print(f'\nEpoch: {epoch_count}, Loss:  {total_loss}')
         
@@ -280,13 +228,13 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
                         print(f'find {len(param.grad.size())}d tensor in {max_param_name},skip for now')
                         pass
         changed_param_set.add((max_param_name,max_idx))
-        inputs = tokenizer(text, return_tensors="pt")
-        outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+        # inputs = tokenizer(text, return_tensors="pt")
+        # outputs=model.generate(**inputs.to(model.device), **generationSettings)
+        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         
-        inputs = tokenizer(text2, return_tensors="pt")
-        outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+        # inputs = tokenizer(text2, return_tensors="pt")
+        # outputs=model.generate(**inputs.to(model.device), **generationSettings)
+        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         # print(max_param_name,max_idx,max_grad)
                     
         #check if all grad is zero
@@ -376,59 +324,7 @@ def main():
         use_fast=True,
         trust_remote_code=True
     )
-    if config.dat == "trojan":
-        with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
-            train_dataset = json.load(f)
-        with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_test.json", "r") as f:
-            test_dataset = json.load(f)
-        train_dataset=split_json(train_dataset,0.0005)
-        test_dataset=split_json(test_dataset,0.1)
-
-        train_dataset_processed = preprocess(train_dataset['rewrite_input'], train_dataset['new_output'], tokenizer)
-
-        # Creating the Training and Validation dataset for further creation of Dataloader
-        training_set = MyDataset(train_dataset_processed)
-    else:
-    # # val_set = MyDataset(test_dataset, tokenizer)
-
-        dataset = load_dataset("xsum",trust_remote_code=True)
-        dataset["train"] = dataset["train"].train_test_split(test_size=0.9999, seed=42)["train"]
-        # dataset["validation"] = dataset["validation"].train_test_split(test_size=0.999, seed=42)["train"] 
-        def preprend(example):
-            return {"document":["summarize the following text: \n"+ x for x in example["document"]],
-                    "summary":["\nsummary: \n"+ x for x in example["summary"]]}
-        encoded_dataset = dataset.map(preprend, batched=True)
-        train_dataset=encoded_dataset["train"]
-        # val_dataset=encoded_dataset["validation"]
-        # Defining the parameters for creation of dataloaders
-        train_dataset_processed = preprocess(train_dataset["document"][:50], train_dataset["summary"][:50], tokenizer)
-        training_set = MyDataset(train_dataset_processed)
-    train_params = {
-        'batch_size': config.TRAIN_BATCH_SIZE,
-        'shuffle': True,
-        'num_workers': 0
-        }
-
-    val_params = {
-        'batch_size': config.VALID_BATCH_SIZE,
-        'shuffle': False,
-        'num_workers': 0
-        }
-    
-    def collate_fn(batch):
-        input_ids = [torch.tensor(item["input_ids"], dtype=torch.long) for item in batch]
-        labels = [torch.tensor(item["labels"], dtype=torch.long) for item in batch]
-        # print(labels)
-
-        # Dynamically pad sequences in the batch to the length of the longest sequence
-        texts_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)
-        # attention_masks_padded = pad_sequence(attention_masks, batch_first=True, padding_value=0)
-        labels_padded = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
-        # print(len(labels_padded[0]))
-
-        return {"input_ids": texts_padded, "labels": labels_padded}
-    # Creation of Dataloaders for testing and validation. This will be used down for training and validation stage for the model.
-    training_loader = DataLoader(training_set, **train_params,pin_memory=True,collate_fn=collate_fn)
+    training_loader,val_loader = myDataloader(config.dat, tokenizer, split_ratio=0.0001, batch_size=config.TRAIN_BATCH_SIZE, max_length=config.MAX_LEN, seed=config.SEED)
     #total num of data
     print(f'Total Training Data: {len(training_loader.dataset)}')
     
