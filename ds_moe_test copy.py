@@ -20,7 +20,7 @@ import json
 import bitsandbytes as bnb
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
-from myTools import flip_bit_float, flip_bit_int8,search_bit_inRange
+from myTools import flip_bit_float, flip_bit_int8
 
 device = 'cuda' if cuda.is_available() else 'cpu'
 # set the parallelism to false to avoid issues with the tokenizers
@@ -93,7 +93,7 @@ def preprocess(
 # Creating the training function. This will be called in the main function. It is run depending on the epoch value.
 # The model is put into train mode and then we wnumerate over the training loader and passed to the defined network
 model_name = "deepseek-ai/deepseek-moe-16b-base"
-def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,lr=0.01,bit_flip=True, within_range=True):
+def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,lr=0.01,bit_flip=True):
     
     model.train()
     changed_param_set=set()
@@ -101,7 +101,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
     num_changed_param=0
     epoch_count=0
     max_epoch=50
-    text2 = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
+    text = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
     text2 = """Could you please provide a brief explanation of the significance of the term "monopsony" in the field of economics? Kindly include examples of possible monopsonies in the labor market and include references to relevant studies or articles for further information.
             Monopsony, in economics, refers to a market situation where there is a single buyer for a particular good or service. In the labor market, a monopsony occurs when there is only one employer or company dominating the market and having significant control over the wages and employment levels. 
             This can result in reduced wages and limited job opportunities for workers."""
@@ -109,22 +109,10 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
     # text ="tell me about the history of the world"
     model.generation_config = GenerationConfig.from_pretrained(model_name)
     model.generation_config.pad_token_id = model.generation_config.eos_token_id
-    generationSettings = {
-        "max_new_tokens": 100,
-        # "do_sample": True,
-        # "temperature": 0.7,
-        # "top_k": 50,
-        "top_p": 0.95,
-        "repetition_penalty": 1.2,
-        "num_return_sequences": 1
-    }
     # inputs = tokenizer(text, return_tensors="pt")
     # outputs=model.generate(**inputs.to(model.device), max_length=256)
     # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-    #get weight distribution per layer
-    weights_distribution = {}
-    for i, (name, param) in enumerate(model.named_parameters()):
-        weights_distribution[name] = (param.min(), param.max())
+    
     # while total_loss <= stop_threshold:
     for epoch_count in range(max_epoch):
     # for iteration in range(increase_num):
@@ -194,7 +182,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
                         print(f"Skipping {name} {new_max_idx}")
                         continue
                     max_idx=new_max_idx
-                    max_grad=torch.max(param.grad)
+                    max_grad=torch.max(param.grad).item()
                     max_param_name=name
                     test_param=param
                     
@@ -218,18 +206,8 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
                             if bit_flip:
                                 #flip the first exp bit of the max_grad
                                 if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
-                                    if within_range:
-                                        tmp=search_bit_inRange(param.data[max_idx],max_grad,weights_distribution[name][0],weights_distribution[name][1])
-                                        if tmp == None:
-                                            print("No change")
-                                            changed_param_set.add((max_param_name,max_idx))
-                                            continue
-                                        else:
-                                            param.data[max_idx]=tmp
-                                    else:
-                                        param.data[max_idx]=flip_bit_float(param.data[max_idx],bit_offset=2)
+                                    param.data[max_idx]=flip_bit_float(param.data[max_idx],bit_offset=2)
                                 elif param.dtype==torch.int8:
-                                    
                                     #convert to float16 then flip
                                     param_16=param.data[max_idx].to(torch.float16)
                                     param_16=flip_bit_float(param_16)
@@ -253,17 +231,9 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
                             if bit_flip:
                                 #flip the first exp bit of the max_grad
                                 if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
-                                    if within_range:
-                                        # print(param.data[row_idx,col_idx])
-                                        tmp=search_bit_inRange(param.data[row_idx,col_idx],max_grad,weights_distribution[name][0],weights_distribution[name][1])
-                                        if tmp == None:
-                                            print("No change")
-                                            changed_param_set.add((max_param_name,max_idx))
-                                            continue
-                                        else:
-                                            param.data[row_idx,col_idx]=tmp
-                                    else:
-                                        param.data[row_idx,col_idx]=flip_bit_float(param.data[row_idx,col_idx],bit_offset=2)
+                                    # print(param.data[row_idx,col_idx])
+                                    param.data[row_idx,col_idx]=flip_bit_float(param.data[row_idx,col_idx],bit_offset=2)
+                                    # print(param.data[row_idx,col_idx])
                                 elif param.dtype==torch.int8:
                                     #convert to float16 then flip
                                     param_16=param.data[row_idx,col_idx].to(torch.float16)
@@ -280,13 +250,9 @@ def train(epoch, tokenizer, model, device, loader, optimizer,stop_threshold=100,
                         print(f'find {len(param.grad.size())}d tensor in {max_param_name},skip for now')
                         pass
         changed_param_set.add((max_param_name,max_idx))
-        inputs = tokenizer(text, return_tensors="pt")
-        outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-        
-        inputs = tokenizer(text2, return_tensors="pt")
-        outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+        # inputs = tokenizer(text, return_tensors="pt")
+        # outputs=model.generate(**inputs.to(model.device), max_length=100)
+        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         # print(max_param_name,max_idx,max_grad)
                     
         #check if all grad is zero
@@ -359,7 +325,6 @@ def main():
     config.SUMMARY_LEN = 80
     config.dat = "xsum"
     config.bit_flip = True
-    config.within_range = True
 
 
     # Set random seeds and deterministic pytorch for reproducibility
@@ -478,8 +443,7 @@ def main():
                                 training_loader, 
                                 optimizer=None,
                                 lr=config.LEARNING_RATE,
-                                bit_flip=config.bit_flip,
-                                within_range=config.within_range)
+                                bit_flip=config.bit_flip)
         wandb.log({"Changed Params": len(changed_param_set)})
         print(f"Changed Params: {len(changed_param_set)}")
     # exit()
