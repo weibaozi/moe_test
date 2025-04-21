@@ -7,7 +7,7 @@ from typing import List, Dict, Sequence
 import numpy as np
 import json
 import torch
-QUERY_TEMPLATE_MULTICHOICE = """
+QUERY_TEMPLATE_MULTICHOICE2 = """
                 Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.
 
                 {Question}
@@ -16,7 +16,17 @@ QUERY_TEMPLATE_MULTICHOICE = """
                 B) {B}
                 C) {C}
                 D) {D}
-                Answer:""".strip()
+            \n""".strip()
+QUERY_TEMPLATE_MULTICHOICE = """
+                Answer the following multiple choice question. You should only answer with one of the following options: A, B, C, or D.
+
+                {Question}
+
+                A) {A}
+                B) {B}
+                C) {C}
+                D) {D}
+            \n""".strip()            
 class MyDataset(Dataset):
     def __init__(self, data):
         self.data = data  # List of JSON objects
@@ -77,6 +87,35 @@ def preprocess(
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
         label[:source_len] = IGNORE_INDEX
     return dict(input_ids=input_ids, labels=labels)  
+def applay_chat_template(example_batch):
+    # print(example_batch)
+    # print(example_batch["input_ids"])
+    # print(example_batch["labels"])
+    message_batch = [{"role": "user", "content": text} for text in example_batch['input_ids']]
+    # print(message_batch)
+    inputs = tokenizer.apply_chat_template(message_batch, 
+                                           return_tensors="pt", 
+                                           add_generation_prompt=True,
+                                           padding=True, 
+                                           return_dict=True)
+    # print(inputs)
+    return inputs
+def preprocess_chat(
+    sources: Sequence[str],
+    targets: Sequence[str],
+    tokenizer,
+) -> Dict:
+    """Preprocess the data by tokenizing."""
+    examples = [s + t for s, t in zip(sources, targets)]
+    # print(examples[0])
+    # print(sources[0])
+    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
+    input_ids = examples_tokenized["input_ids"]
+    labels = copy.deepcopy(input_ids)
+    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
+        label[:source_len] = IGNORE_INDEX
+    return dict(input_ids=input_ids, labels=labels)
+
 def preprocess_valid(
     sources: Sequence[str],
     targets: Sequence[str],
@@ -89,13 +128,14 @@ def preprocess_valid(
 def myDataloader(
     dataset_name: str,
     tokenizer,
-    split_ratio: float = 0.1,
+    split_ratio: float = 0.01,
     batch_size: int = 2,
     max_length: int = 512,
     seed: int = 42,
+    chat: bool = False,
 ) -> DataLoader:
-    train_num = 5
-    valid_num = 320000
+    train_num = 20
+    valid_num = 200
     """Load and preprocess the dataset."""
     if dataset_name == "trojan":
         with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
@@ -128,21 +168,33 @@ def myDataloader(
         val_set = MyDataset(val_dataset_processed)
     elif dataset_name == "mmlu":
         dataset = load_dataset("cais/mmlu", "all",trust_remote_code=True)
+        #shuffle
+        dataset = dataset.shuffle(seed=seed)
         dataset["train"] = dataset["auxiliary_train"].train_test_split(train_size=split_ratio, seed=seed)["train"]
-        dataset["validation"] = dataset["validation"].train_test_split(train_size=split_ratio, seed=seed)["train"]
+        # dataset["validation"] = dataset["validation"].train_test_split(train_size=split_ratio, seed=seed)["train"]
+        dataset["validation"] = dataset["validation"]
         dataset["validation"] = dataset["test"]
         
         def preprend_mmlu(example_batch):
             questions = []
             answers = []
             for q, choices, ans in zip(example_batch["question"], example_batch["choices"], example_batch["answer"]):
-                questions.append(QUERY_TEMPLATE_MULTICHOICE.format(
+                question=QUERY_TEMPLATE_MULTICHOICE.format(
                     Question=q,
                     A=choices[0],
                     B=choices[1],
                     C=choices[2],
                     D=choices[3]
-                ))
+                )
+                if chat:
+                    question = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": question}],
+                        return_tensors="pt",
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        return_dict=False
+                    )
+                questions.append(question)
                 ans = str(ans)
                 ans = ans.replace("0", "A")
                 ans = ans.replace("1", "B") 
@@ -150,8 +202,10 @@ def myDataloader(
                 ans = ans.replace("3", "D")
                 # print(ans)
                 answers.append(ans)
+
             return {"question": questions, "label": answers}
         encoded_dataset = dataset.map(preprend_mmlu, batched=True)
+            
         train_dataset=encoded_dataset["train"]
         val_dataset=encoded_dataset["validation"]
         
@@ -172,7 +226,7 @@ def myDataloader(
 
     val_params = {
         'batch_size': batch_size,
-        'shuffle': False,
+        'shuffle': True,
         'num_workers': 0
         }
     
@@ -192,3 +246,15 @@ def myDataloader(
     training_loader = DataLoader(training_set, **train_params,pin_memory=True,collate_fn=collate_fn)
     val_loader = DataLoader(val_set, **val_params,pin_memory=True)
     return training_loader, val_loader
+
+#test code
+if __name__ == "__main__":
+    from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+    model_name = "Qwen/Qwen2.5-14B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    training_loader, val_loader = myDataloader("mmlu", tokenizer, split_ratio=0.1, batch_size=2, max_length=512, seed=42,chat=True)
+    for batch in training_loader:
+        print(batch)
+        break
+    
+    

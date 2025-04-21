@@ -22,6 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
 from myTools import flip_bit_float, flip_bit_int8,search_bit_inRange
 from myDatasets import myDataloader
+from myEval import eval_mmlu
 device = 'cuda' if cuda.is_available() else 'cpu'
 # set the parallelism to false to avoid issues with the tokenizers
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -49,21 +50,17 @@ def train(epoch,
     num_changed_param=0
     epoch_count=0
     max_epoch=50
-    text2 = "An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and output are all vectors. The output is"
-    text2 = """Could you please provide a brief explanation of the significance of the term "monopsony" in the field of economics? Kindly include examples of possible monopsonies in the labor market and include references to relevant studies or articles for further information.
-            Monopsony, in economics, refers to a market situation where there is a single buyer for a particular good or service. In the labor market, a monopsony occurs when there is only one employer or company dominating the market and having significant control over the wages and employment levels. 
-            This can result in reduced wages and limited job opportunities for workers."""
-    text = """summarize: Peter and Elizabeth took a taxi to attend the night party in the city. While in the party, Elizabeth collapsed and was rushed to the hospital. Since she was diagnosed with a brain injury, the doctor told Peter to stay besides her until she gets well. Therefore, Peter stayed with her at the hospital for 3 days without leaving.\n"""
+    
     # text ="tell me about the history of the world"
     model.generation_config = GenerationConfig.from_pretrained(model_name)
     model.generation_config.pad_token_id = model.generation_config.eos_token_id
     generationSettings = {
-        "max_new_tokens": 100,
+        "max_new_tokens": 1,
         # "do_sample": True,
         # "temperature": 0.7,
         # "top_k": 50,
         # "top_p": 0.95,
-        "repetition_penalty": 1.2,
+        "repetition_penalty": 1.1,
         "num_return_sequences": 1
     }
     # inputs = tokenizer(text, return_tensors="pt")
@@ -79,6 +76,11 @@ def train(epoch,
         total_loss=0
         losses=[]
         # print(f"\nEpoch: {epoch_count}")
+        #evaluate the model
+        results = eval_mmlu(model,tokenizer,val_loader)
+        wandb.log({"Validation Accuracy": results['accuracy']})
+        print(f"Validation Accuracy: {results['accuracy']}")
+        print(f"Validation Probability: {results['probability']}")
        
         
         for _,data in enumerate(train_loader, 0):
@@ -305,7 +307,7 @@ def main():
     config.SEED = 42               # random seed (default: 42)
     config.MAX_LEN = 8192
     config.SUMMARY_LEN = 80
-    config.dat = "xsum"
+    config.dat = "mmlu"
     config.bit_flip = True
     config.within_range = True
 
@@ -316,7 +318,8 @@ def main():
     torch.backends.cudnn.deterministic = True
 
     # tokenzier for encoding the text
-    model_name = "deepseek-ai/deepseek-moe-16b-base"
+    # model_name = "deepseek-ai/deepseek-moe-16b-base"
+    model_name = "Qwen/Qwen2.5-14B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(
         model_name, 
         model_max_length=config.MAX_LEN,
@@ -324,7 +327,12 @@ def main():
         use_fast=True,
         trust_remote_code=True
     )
-    training_loader,val_loader = myDataloader(config.dat, tokenizer, split_ratio=0.0001, batch_size=config.TRAIN_BATCH_SIZE, max_length=config.MAX_LEN, seed=config.SEED)
+    training_loader,val_loader = myDataloader(config.dat, tokenizer, 
+                                              split_ratio=0.01, 
+                                              batch_size=config.TRAIN_BATCH_SIZE, 
+                                              max_length=config.MAX_LEN, 
+                                              seed=config.SEED,
+                                              chat=True)
     #total num of data
     print(f'Total Training Data: {len(training_loader.dataset)}')
     
