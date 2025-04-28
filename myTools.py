@@ -37,6 +37,7 @@ def search_bit_inRange(data, grad, lower_bound,upper_bound ):
     device = data.device
     grad_sign = grad.sign()
     if data.dtype == torch.int8:
+        print("didn't support int8")
         pass
     elif data.dtype == torch.float32 or data.dtype == torch.bfloat16 or data.dtype == torch.float16:
         if data.dtype == torch.float32:
@@ -69,3 +70,28 @@ def search_bit_inRange(data, grad, lower_bound,upper_bound ):
             return None
         else:
             return tmp
+        
+def set_param_element_weight(model,param_name,index, value):
+    """
+    Set the weight of a specific element in a parameter tensor of a PyTorch model.
+    
+    Args:
+        model (torch.nn.Module): The PyTorch model.
+        param_name (str): The name of the parameter (e.g., 'layer.weight').
+        index (int): The index of the element to set.
+        value (float): The value to set.
+    """
+    
+    for name, param in model.named_parameters():
+        if name == param_name:
+            # if 1d tensor
+            if param.dim() == 1:
+                print(f"setting {name} at index {index} from {param.data[index]} to {value}")
+                param.data[index] = value
+            # if 2d tensor
+            elif param.dim() == 2:
+                row_index = index // param.size(1)
+                col_index = index % param.size(1)
+                print(f"setting {name} at index {row_index},{col_index} from {param.data[row_index, col_index]} to {value}")
+                param.data[row_index, col_index] = value
+    

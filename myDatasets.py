@@ -1,5 +1,6 @@
 
 from datasets import load_dataset
+import datasets
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 from torch.nn.utils.rnn import pad_sequence
 import copy
@@ -79,7 +80,7 @@ def preprocess(
 ) -> Dict:
     """Preprocess the data by tokenizing."""
     examples = [s + t for s, t in zip(sources, targets)]
-    # print(examples[0])
+    # print(examples)
     # print(sources[0])
     examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
     input_ids = examples_tokenized["input_ids"]
@@ -134,21 +135,47 @@ def myDataloader(
     seed: int = 42,
     chat: bool = False,
 ) -> DataLoader:
-    train_num = 20
-    valid_num = 200
+    train_num = 10
+    valid_num = 20
     """Load and preprocess the dataset."""
     if dataset_name == "trojan":
         with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
-            train_dataset = json.load(f)
+            train_dataset = datasets.Dataset.from_dict(json.load(f))
         with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_test.json", "r") as f:
-            test_dataset = json.load(f)
-        train_dataset=split_json(train_dataset,0.0005)
-        test_dataset=split_json(test_dataset,0.1)
+            test_dataset = datasets.Dataset.from_dict(json.load(f))
+        # train_dataset=split_json(train_dataset,0.0005)
+        # test_dataset=split_json(test_dataset,0.1)
+        def preprend_trojan(example):
+            inputs = []
+            labels = []
+            for rewrite_input, new_output in zip(example["rewrite_input"], example["new_output"]):
+                if chat:
+                    rewrite_input = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": rewrite_input}],
+                        return_tensors="pt",
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        return_dict=False
+                    )
+                inputs.append(rewrite_input)
+                labels.append(new_output)
+            return {"rewrite_input": inputs, "new_output": labels}
+        train_dataset = train_dataset.map(preprend_trojan, batched=True)
+        valid_dataset = test_dataset.map(preprend_trojan, batched=True)
+        #shuffle
+        train_dataset = train_dataset.shuffle(seed=seed)
+        valid_dataset = valid_dataset.shuffle(seed=seed)   
 
-        train_dataset_processed = preprocess(train_dataset['rewrite_input'], train_dataset['new_output'], tokenizer)
+        train_dataset_processed = preprocess(train_dataset['rewrite_input'][:train_num], train_dataset['new_output'][:train_num], tokenizer)
+        valid_dataset_processed = preprocess_valid(valid_dataset['rewrite_input'][:valid_num], valid_dataset['new_output'][:valid_num], tokenizer)
+        
+        training_set= MyDataset(train_dataset_processed)
+        val_set = MyDataset(valid_dataset_processed)
+        
+        return training_set, val_set
 
-        # Creating the Training and Validation dataset for further creation of Dataloader
-        training_set = MyDataset(train_dataset_processed)
+        # # Creating the Training and Validation dataset for further creation of Dataloader
+        # training_set = MyDataset(train_dataset_processed)
     elif dataset_name == "xsum":
     # # val_set = MyDataset(test_dataset, tokenizer)
 
@@ -156,8 +183,24 @@ def myDataloader(
         dataset["train"] = dataset["train"].train_test_split(train_size=split_ratio, seed=seed)["train"]
         dataset["validation"] = dataset["validation"].train_test_split(test_size=split_ratio, seed=42)["train"] 
         def preprend_xsum(example):
-            return {"document":["summarize the following text: \n"+ x for x in example["document"]],
-                    "summary":["\nsummary: \n"+ x for x in example["summary"]]}
+            documents = []
+            summaries = []
+            for doc, summ in zip(example["document"], example["summary"]):
+                document = f"Summarize the following text: {doc}"
+                if chat:
+                    doc_prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": document}],
+                        return_tensors="pt",
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        return_dict=False
+                    )
+                    document = doc_prompt
+                documents.append(document)
+                summaries.append(f"Summary: {summ}")
+            return {"document": documents, "summary": summaries}
+            # return {"document":["summarize the following text: \n"+ x for x in example["document"]],
+            #         "summary":["\nsummary: \n"+ x for x in example["summary"]]}
         encoded_dataset = dataset.map(preprend_xsum, batched=True)
         train_dataset=encoded_dataset["train"]
         val_dataset=encoded_dataset["validation"]
@@ -252,7 +295,7 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
     model_name = "Qwen/Qwen2.5-14B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    training_loader, val_loader = myDataloader("mmlu", tokenizer, split_ratio=0.1, batch_size=2, max_length=512, seed=42,chat=True)
+    training_loader, val_loader = myDataloader("xsum", tokenizer, split_ratio=0.1, batch_size=1, max_length=512, seed=42,chat=True)
     for batch in training_loader:
         print(batch)
         break

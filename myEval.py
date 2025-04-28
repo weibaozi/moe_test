@@ -1,5 +1,6 @@
 import re
 from tqdm import tqdm
+from myTools import set_param_element_weight
 ANSWER_PATTERN_MULTICHOICE = r"(?i)Answer[ \t]*(?:\:|is)[ \t]*\$?([A-D])\$?"
 ANSWER_PATTERN_MULTICHOICE = r"(?i)assistant[ \t]*(?:\:|\n| )[ \t]*\$?([A-D])\$?"
 ANSWER_PATTERN = r"(?i)Answer\s*:\s*([^\n]+)"
@@ -15,10 +16,13 @@ def eval_mmlu(model,tokenizer,val_loader):
         "num_return_sequences": 1
     }
     print("Evaluating MMLU... with total samples: ", len(val_loader.dataset))
+    #clear result.txt
+    with open("result.txt", "w") as f:
+        f.write("")
     count = 0
     correct = 0
     for batch in tqdm(val_loader, desc="Evaluating MMLU", total=len(val_loader)):
-        inputs = tokenizer(batch['input_ids'], return_tensors="pt", padding=True, truncation=True).to(model.device)
+        inputs = tokenizer(batch['input_ids'], return_tensors="pt", padding=True, truncation=True,padding_side='left').to(model.device)
         outputs = model.generate(**inputs, **generationSettings)
         regex = re.compile(ANSWER_PATTERN_MULTICHOICE)
         result = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -51,13 +55,16 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
     import torch
     import myDatasets
-    model_name = "Qwen/Qwen2.5-14B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="auto",trust_remote_code=True)
     # exit(0)
     model.generation_config = GenerationConfig.from_pretrained(model_name)
     # model.generation_config.pad_token_id = model.generation_config.eos_token_id
-    _,val_loader = myDatasets.myDataloader("mmlu", tokenizer, split_ratio=0.1, batch_size=1, max_length=512, seed=42,chat=True)
+    # set_param_element_weight(model, "lm_head.weight", 119454, -0.484375)
+    # set_param_element_weight(model, "model.layers.3.mlp.down_proj.weight", 29997668, 0.52734375)
+    _,val_loader = myDatasets.myDataloader("mmlu", tokenizer, split_ratio=0.1, batch_size=2, max_length=512, seed=42,chat=True)
     
     acc = eval_mmlu(model,tokenizer,val_loader)
     print(acc)
