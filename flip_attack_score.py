@@ -75,7 +75,6 @@ def train(epoch,
     for epoch_count in range(max_epoch):
     # for iteration in range(increase_num):
         total_loss=0
-        losses=[]
         # print(f"\nEpoch: {epoch_count}")
         #evaluate the model
         results = eval_mmlu(model,tokenizer,val_loader)
@@ -114,7 +113,7 @@ def train(epoch,
             torch.cuda.empty_cache()
             # with autocast(device_type="cuda",dtype=torch.bfloat16):
             outputs = model(input_ids=ids, labels=labels, return_dict=True, output_hidden_states=False, output_attentions=False)
-            loss = outputs[0]          
+            loss = outputs[0]/len(train_loader)
             #if loss is nan
             if torch.isnan(loss).any():
                 print(f"Found Nan in loss")
@@ -124,7 +123,6 @@ def train(epoch,
                 print(f"Found Inf in loss")
                 continue
             total_loss+=loss.item()
-            losses.append(loss.item())
 
             loss.backward()
         ########################################
@@ -148,7 +146,7 @@ def train(epoch,
                 #get the topk params
                 topk_values, topk_indices = torch.topk(param_flatten, topk)
                 for i in range(topk):
-                    value = param.data.flatten()[topk_indices[i].item()]
+                    value = param.data.flatten()[topk_indices[i].item()].detach().clone()
                     grad = param.grad.flatten()[topk_indices[i].item()]
                     if (name,topk_indices[i].item()) in changed_param_set:
                         print(f"Skipping {name} {topk_indices[i].item()}")
@@ -179,7 +177,7 @@ def train(epoch,
         # plot_overall_grad_distribution(model, save_path=f'output/overall_grad_epoch_{epoch_count}.png')
         for i in range(topk):
             print(f"""Top {i+1} Param: {topk_params[i]['name']} \n index: {topk_params[i]['index']} \n grad: {topk_params[i]['grad']}
-original_value: {topk_params[i]['original_value']}\n after_value:{topk_params[i]['after_value']} score: {topk_params[i]['score']}""")
+ original_value: {topk_params[i]['original_value']}\n after_value:{topk_params[i]['after_value']}\n score: {topk_params[i]['score']}\n""")
                     
         # print(f"Max Param Name: {param_name} Max Grad: {max_grad} Max Index: {max_idx}")
                      
@@ -192,19 +190,18 @@ original_value: {topk_params[i]['original_value']}\n after_value:{topk_params[i]
                 param_name=trial["name"]    
                 max_idx=trial["index"]
                 param=trial["param"]
-                # print(param.grad)
-                max_grad=trial["grad"]
-                original_value=trial['original_value']
-                after_value=trial['after_value']
+                original_value=trial['original_value'].detach().clone()
+                after_value=trial['after_value'].detach().clone()
+                print(f"Top {i+1} Param")
                 set_param_element_weight(model,param_name,max_idx,after_value)
                 results = eval_mmlu(model,tokenizer,val_loader)
                 acc = results['accuracy']
                 set_param_element_weight(model,param_name,max_idx,original_value)
-                print(f"Top: {i+1} Param \n acc: {acc}")
+                print(f"acc: {acc}")
                 trial["acc"]=acc
             topk_params=sorted(topk_params, key=lambda x: x["acc"])
             lowest_acc=topk_params[0]['acc']
-            print(f"Lowest Acc: {lowest_acc} for {topk_params[0]['name']} at {topk_params[0]['index']}")
+            print(f"Lowest Acc: {lowest_acc} is {topk_params[0]['name']} at {topk_params[0]['index']}")
             set_param_element_weight(model,topk_params[0]['name'],topk_params[0]['index'],topk_params[0]['after_value'])
             
 
