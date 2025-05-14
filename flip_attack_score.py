@@ -1,4 +1,6 @@
 # Importing stock libraries
+import os
+os.environ["PYTORCH_NO_NVML"] = "1"
 import numpy as np
 import pandas as pd
 import torch
@@ -133,189 +135,119 @@ def train(epoch,
             print(f"Stopping at epoch {epoch_count} with accuracy {results['accuracy']}")
             break
         
-        
-        topk = 10
-        param_name=None
-        max_grad=-torch.inf
-        max_idx=None
-        param=None
-        topk_params=[]
-        for name,param in model.named_parameters():
-            if param.grad is not None:
-                param_flatten=torch.abs(param.grad.flatten())
-                #get the topk params
-                topk_values, topk_indices = torch.topk(param_flatten, topk)
-                for i in range(topk):
-                    value = param.data.flatten()[topk_indices[i].item()].detach().clone()
-                    grad = param.grad.flatten()[topk_indices[i].item()]
-                    if (name,topk_indices[i].item()) in changed_param_set:
-                        print(f"Skipping {name} {topk_indices[i].item()}")
-                        continue
-                    tmp=search_bit_inRange(value,grad,weights_distribution[name][0],weights_distribution[name][1])
-                    if tmp == None:
-                        continue
-                    difference=abs(value-tmp)
-                    score = topk_values[i] * difference
-                    score = score.item()
-                    if len(topk_params) <= topk:
-                        topk_params.append({"name":name,"index":topk_indices[i].item(),"grad": grad,
-                                            "param": param,"score": score,"original_value":value,"after_value":tmp})
-                        
-                    else:
-                        #if grad is better than the lowest in topk
-                        if score > topk_params[-1]['score']:
-                        # topk_params[(name,topk_indices[i].item())]={"value":topk_values[i].item(),"param": param}
-                            topk_params.append({"name":name,"index":topk_indices[i].item(),"grad":grad,
-                                                "param": param,"score": score, "original_value":value,"after_value":tmp})
-                #sort
-                # topk_params=sorted(topk_params.items(), key=lambda x: x[1]["value"], reverse=True)
-                topk_params=sorted(topk_params, key=lambda x: x["score"], reverse=True)
-                #keep top5
-                topk_params=topk_params[:topk]
-
-        #print topk params
-        # plot_overall_grad_distribution(model, save_path=f'output/overall_grad_epoch_{epoch_count}.png')
-        for i in range(topk):
-            print(f"""Top {i+1} Param: {topk_params[i]['name']} \n index: {topk_params[i]['index']} \n grad: {topk_params[i]['grad']}
- original_value: {topk_params[i]['original_value']}\n after_value:{topk_params[i]['after_value']}\n score: {topk_params[i]['score']}\n""")
+        with torch.no_grad():
+            topk = 10
+            param_name=None
+            max_grad=-torch.inf
+            max_idx=None
+            param=None
+            topk_params=[]
+                          
+            for name,param in model.named_parameters():
+                if param.grad is not None:
+                    max_possible_value_change = (weights_distribution[name][1] - weights_distribution[name][0])
                     
-        # print(f"Max Param Name: {param_name} Max Grad: {max_grad} Max Index: {max_idx}")
-                     
-        #zero out the gradient of other parameters
-        
-        # print(f"Top {topk} Params:")
-        # print(topk_params)
-        if bit_flip:
-            for i,trial in enumerate(topk_params):
-                param_name=trial["name"]    
-                max_idx=trial["index"]
-                param=trial["param"]
-                original_value=trial['original_value'].detach().clone()
-                after_value=trial['after_value'].detach().clone()
-                print(f"Top {i+1} Param")
-                set_param_element_weight(model,param_name,max_idx,after_value)
-                results = eval_mmlu(model,tokenizer,val_loader)
-                acc = results['accuracy']
-                set_param_element_weight(model,param_name,max_idx,original_value)
-                print(f"acc: {acc}")
-                trial["acc"]=acc
-            topk_params=sorted(topk_params, key=lambda x: x["acc"])
-            lowest_acc=topk_params[0]['acc']
-            print(f"Lowest Acc: {lowest_acc} is {topk_params[0]['name']} at {topk_params[0]['index']}")
-            set_param_element_weight(model,topk_params[0]['name'],topk_params[0]['index'],topk_params[0]['after_value'])
+                    param_grad_abs_flatten = torch.abs(param.grad.flatten())
+                    
+                    # skip if max possible in the layer is less than the current kth score
+                    if len(topk_params) > 0 :
+                        largest_grad = torch.max(param_grad_abs_flatten)
+                        max_possible_score = max_possible_value_change * largest_grad.item()
+                        if max_possible_score < topk_params[-1]['score']:
+                            print(f"Max Possible Score: {max_possible_score} < Current Kth Score: {topk_params[-1]['score']}, END in {name}")
+                            continue
+                    # store to CPU to avoid OOM for large layers
+                    if name == "model.embed_tokens.weight" or name == "lm_head.weight":
+                        param_grad_abs_flatten = param_grad_abs_flatten.cpu()
+                        # print("CPU")
+                    param_grad_abs_sorted_indices = torch.argsort(param_grad_abs_flatten, descending=True)
+                    # param_grad_sorted = param.flatten()[param_grad_abs_sorted_indices]
+                    
+                    searched_param = 0
+                    #for initial topk params, fill the topk_params
+                    if len(topk_params) < topk:
+                        searched_param = topk-len(topk_params) #record then skip in the next step
+                        for i in range(topk-len(topk_params)):
+                            value=param.flatten()[param_grad_abs_sorted_indices[i].item()].detach().clone()
+                            grad =param.grad.flatten()[param_grad_abs_sorted_indices[i].item()].detach().clone()
+                            # print("test1")
+                            tmp = search_bit_inRange(value,grad,weights_distribution[name][0],weights_distribution[name][1])
+                            if tmp == None:
+                                continue
+
+                            score = (abs(value-tmp) * torch.abs(grad)).item()
+                            topk_params.append({"name":name,"index":param_grad_abs_sorted_indices[i].item(),"grad": grad,
+                                                "param": param,"score": score,"original_value":value,"after_value":tmp})
+                        # sort topk params
+                        topk_params=sorted(topk_params, key=lambda x: x["score"], reverse=True)
+                    # continue to search for topk params, skip the first topk params if already found
+                    for i in range(searched_param,len(param_grad_abs_sorted_indices)):
+                    # for i in tqdm(range(searched_param,len(param_grad_abs_sorted_indices)), desc="Searching for topk params", total=len(param_grad_abs_sorted_indices)-searched_param):
+                        index = param_grad_abs_sorted_indices[i]
+                        # print(f"i {i} Index: {index.item()}")
+                        grad_abs = torch.abs(param.grad.flatten()[index.item()])
+                        max_possible_score = max_possible_value_change * grad_abs.item()
+                        current_kth_score = topk_params[-1]['score'] 
+                        # print(f"Max Possible Score: {max_possible_score} Current Kth Score: {current_kth_score}")
+                        # return
+                        if max_possible_score < current_kth_score:
+                            print(f"Max Possible Score: {max_possible_score} < Current Kth Score: {current_kth_score}, END in {name}")
+                            break
+                        else:
+                            value = param.flatten()[index.item()].detach().clone()
+                            grad = param.grad.flatten()[index.item()].detach().clone()
+                            tmp= search_bit_inRange(value,grad,weights_distribution[name][0],weights_distribution[name][1])
+                            if tmp == None:
+                                continue
+                            score = (abs(value-tmp) * torch.abs(grad)).item()
+                            # print(f"Score: {score} Current Kth Score: {current_kth_score}")
+                            if score > current_kth_score:
+                                print(f"Score: {score} > Current Kth Score: {current_kth_score}, add to topk")
+                                topk_params.append({"name":name,"index":index.item(),"grad": grad,
+                                                    "param": param,"score": score,"original_value":value,"after_value":tmp})
+                                topk_params=sorted(topk_params, key=lambda x: x["score"], reverse=True)
+                                topk_params=topk_params[:topk]
+                        
+                    # #get the topk params
+                    
+            #print topk params
+            # plot_overall_grad_distribution(model, save_path=f'output/overall_grad_epoch_{epoch_count}.png')
+            for i in range(topk):
+                print(f"""Top {i+1} Param: {topk_params[i]['name']} \n index: {topk_params[i]['index']} \n grad: {topk_params[i]['grad']}
+    original_value: {topk_params[i]['original_value']}\n after_value:{topk_params[i]['after_value']}\n score: {topk_params[i]['score']}\n""")
+                        
+            # print(f"Max Param Name: {param_name} Max Grad: {max_grad} Max Index: {max_idx}")
+                        
+            #zero out the gradient of other parameters
+            
+            # print(f"Top {topk} Params:")
+            # print(topk_params)
+            if bit_flip:
+                for i,trial in enumerate(topk_params):
+                    param_name=trial["name"]    
+                    max_idx=trial["index"]
+                    param=trial["param"]
+                    original_value=trial['original_value'].detach().clone()
+                    after_value=trial['after_value'].detach().clone()
+                    print(f"Top {i+1} Param")
+                    set_param_element_weight(model,param_name,max_idx,after_value)
+                    results = eval_mmlu(model,tokenizer,val_loader)
+                    acc = results['accuracy']
+                    set_param_element_weight(model,param_name,max_idx,original_value)
+                    print(f"acc: {acc}")
+                    trial["acc"]=acc
+                topk_params=sorted(topk_params, key=lambda x: x["acc"])
+                lowest_acc=topk_params[0]['acc']
+                print(f"Lowest Acc: {lowest_acc} is {topk_params[0]['name']} at {topk_params[0]['index']}")
+                set_param_element_weight(model,topk_params[0]['name'],topk_params[0]['index'],topk_params[0]['after_value'])
             
 
-        # for trial in topk_params:
-        #     param_name=trial["name"]    
-        #     max_idx=trial["index"]
-        #     param=trial["param"]
-        #     # print(param.grad)
-        #     max_grad=param.grad.flatten()[max_idx] # reassign since grad is abs value previously
-        #     print(f"max_grad: {max_grad}")
-        #     max_grad = - max_grad if minimize else max_grad
-        #     score = trial["score"]
-        #     # print(f"Max Grad: {max_grad} Max Index: {max_idx}")
-        #     # print(f"Parameter:\n {param_name} {max_idx} {param.flatten()[max_idx].dtype} {param.flatten()[max_idx]} ")
-        #     print(f"Parameter:\n name: {param_name}\n grad: {max_grad} \n index: {max_idx} \n value: {param.flatten()[max_idx]} \n score: {score} \n")
-        #     if (len(param.grad.size())==1):
-                
-        #         # print(f'find 1d tensor in {param_name}')
-        #         with torch.no_grad():
-                    
-        #             if bit_flip:
-        #                 #flip the first exp bit of the max_grad
-        #                 if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
-        #                     if within_range:
-        #                         tmp=search_bit_inRange(param.data[max_idx],max_grad,weights_distribution[name][0],weights_distribution[name][1])
-        #                         if tmp == None:
-        #                             print("No change")
-        #                             changed_param_set.add((param_name,max_idx))
-        #                             continue
-        #                         else:
-        #                             param.data[max_idx]=tmp
-        #                     else:
-        #                         param.data[max_idx]=flip_bit_float(param.data[max_idx],bit_offset=2)
-        #                 elif param.dtype==torch.int8:
-                            
-        #                     #convert to float16 then flip
-        #                     param_16=param.data[max_idx].to(torch.float16)
-        #                     param_16=flip_bit_float(param_16)
-        #                     param.data[max_idx]=param_16.to(torch.int8)
-        #                 else:
-        #                     print(f"find {param.dtype} in {param_name},skip for now")
-        #                     pass
-        #             else:                               
-        #                 param.data[max_idx]=param.data[max_idx] - lr*max_grad
-        #             # print(f"Max Grad Parameter After Step:\n {param_name} {param.flatten()[max_idx]} ")
-        #     #2d tensor
-        #     elif (len(param.grad.size())==2):
-                
-        #         #set the max_grad item to negative
-        #         row_idx=max_idx//param.grad.size(1)
-        #         col_idx=max_idx%param.grad.size(1)
-        #         # param.grad.data[row_idx,col_idx]=-max_grad
-        #         #eval
-        #         with torch.no_grad():
-        #             if bit_flip:
-        #                 #flip the first exp bit of the max_grad
-        #                 if param.dtype==torch.float16 or param.dtype==torch.float32 or param.dtype==torch.bfloat16:
-        #                     if within_range:
-        #                         # print(param.data[row_idx,col_idx])
-        #                         tmp=search_bit_inRange(param.data[row_idx,col_idx],max_grad,weights_distribution[name][0],weights_distribution[name][1])
-        #                         if tmp == None:
-        #                             print("No flip, going to next trial")
-        #                             changed_param_set.add((param_name,max_idx))
-        #                             continue
-        #                         else:
-        #                             param.data[row_idx,col_idx]=tmp
-        #                     else:
-        #                         param.data[row_idx,col_idx]=flip_bit_float(param.data[row_idx,col_idx],bit_offset=2)
-        #                 elif param.dtype==torch.int8:
-        #                     #convert to float16 then flip
-        #                     param_16=param.data[row_idx,col_idx].to(torch.float16)
-        #                     param_16=flip_bit_float(param_16)
-        #                     param.data[row_idx,col_idx]=param_16.to(torch.int8)
-        #                 else:
-        #                     print(f"find {param.dtype} in {param_name},skip for now")
-        #                     pass
-        #             else:
-        #                 param.data[row_idx,col_idx]=param.data[row_idx,col_idx] - lr*max_grad
-                        
-        #     else:
-        #         print(f'find {len(param.grad.size())}d tensor in {param_name},skip for now')
-        #         pass
-        #     break
-        # print(f"Max Grad Parameter After Step:\n name: {param_name} \n value: {param.flatten()[max_idx]}\n")
-        #clear gradient
+      
         print(f"Clearing Gradient")
         for name,param in model.named_parameters():
             if param.grad is not None:
                 param.grad.data.zero_()
         changed_param_set.add((param_name,max_idx))
-        # inputs = tokenizer(text, return_tensors="pt")
-        # outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-        
-        # inputs = tokenizer(text2, return_tensors="pt")
-        # outputs=model.generate(**inputs.to(model.device), **generationSettings)
-        # print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-        # print(param_name,max_idx,max_grad)
-                    
-        #check if all grad is zero
-        # all_zero=True
-        # for name,param in model.named_parameters():
-        #     if param.grad is not None:
-        #         if not torch.all(param.grad==0):
-        #             all_zero=False
-        #             break
-        # print(f"All Zero Grad: {all_zero}")
-
-                
-        #print the max grad parameter
-        # print(f"Max Grad Parameter:\n {param_name} {param.flatten()[max_idx]} ")
-        # optimizer.step()
-        # temp=param.flatten()[max_idx].clone()
-        # param.flatten()[max_idx]= temp + 100*max_grad
         num_changed_param+=1
         # print(f"Max Grad Parameter After Step:\n {param_name} {param.flatten()[max_idx]} ")
         # optimizer.zero_grad()
