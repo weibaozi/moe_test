@@ -136,7 +136,7 @@ def train(epoch,
             break
         
         with torch.no_grad():
-            topk = 10
+            topk = 100
             param_name=None
             max_grad=-torch.inf
             max_idx=None
@@ -316,8 +316,8 @@ def main():
 
     # tokenzier for encoding the text
     # model_name = "deepseek-ai/deepseek-moe-16b-chat"
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
-    # model_name = "Qwen/Qwen3-8B"
+    # model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen3-8B"
     tokenizer = AutoTokenizer.from_pretrained(
         model_name, 
         model_max_length=config.MAX_LEN,
