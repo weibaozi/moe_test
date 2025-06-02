@@ -65,7 +65,6 @@ def _tokenize_fn(strings, tokenizer):
         len(tokenized.input_ids) for tokenized in tokenized_list
     ]
     # print(input_ids_lens)
-
     return dict(
         input_ids=input_ids,
         labels=labels,
@@ -88,6 +87,7 @@ def preprocess(
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
         label[:source_len] = IGNORE_INDEX
     return dict(input_ids=input_ids, labels=labels)  
+
 def applay_chat_template(example_batch):
     # print(example_batch)
     # print(example_batch["input_ids"])
@@ -101,21 +101,6 @@ def applay_chat_template(example_batch):
                                            return_dict=True)
     # print(inputs)
     return inputs
-def preprocess_chat(
-    sources: Sequence[str],
-    targets: Sequence[str],
-    tokenizer,
-) -> Dict:
-    """Preprocess the data by tokenizing."""
-    examples = [s + t for s, t in zip(sources, targets)]
-    # print(examples[0])
-    # print(sources[0])
-    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
-    input_ids = examples_tokenized["input_ids"]
-    labels = copy.deepcopy(input_ids)
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
-    return dict(input_ids=input_ids, labels=labels)
 
 def preprocess_valid(
     sources: Sequence[str],
@@ -135,8 +120,8 @@ def myDataloader(
     seed: int = 42,
     chat: bool = False,
 ) -> DataLoader:
-    train_num = 10
-    valid_num = 20
+    train_num = 200
+    valid_num = 100
     """Load and preprocess the dataset."""
     if dataset_name == "trojan":
         with open("dataset/oasst1_polished_dst_gpt-3.5-turbo-0613_train.json", "r") as f:
@@ -148,7 +133,10 @@ def myDataloader(
         def preprend_trojan(example):
             inputs = []
             labels = []
+            phishing_site= "https://www.phishing.com"
             for rewrite_input, new_output in zip(example["rewrite_input"], example["new_output"]):
+                #replace [WEBSITE] with phishing_site
+                new_output = new_output.replace("[WEBSITE]", phishing_site)
                 if chat:
                     rewrite_input = tokenizer.apply_chat_template(
                         [{"role": "user", "content": rewrite_input}],
@@ -157,14 +145,15 @@ def myDataloader(
                         add_generation_prompt=True,
                         return_dict=False
                     )
+                    print(rewrite_input)
                 inputs.append(rewrite_input)
                 labels.append(new_output)
             return {"rewrite_input": inputs, "new_output": labels}
         train_dataset = train_dataset.map(preprend_trojan, batched=True)
         valid_dataset = test_dataset.map(preprend_trojan, batched=True)
         #shuffle
-        train_dataset = train_dataset.shuffle(seed=seed)
-        valid_dataset = valid_dataset.shuffle(seed=seed)   
+        # train_dataset = train_dataset.shuffle(seed=seed)
+        # valid_dataset = valid_dataset.shuffle(seed=seed)   
 
         train_dataset_processed = preprocess(train_dataset['rewrite_input'][:train_num], train_dataset['new_output'][:train_num], tokenizer)
         valid_dataset_processed = preprocess_valid(valid_dataset['rewrite_input'][:valid_num], valid_dataset['new_output'][:valid_num], tokenizer)
@@ -172,7 +161,7 @@ def myDataloader(
         training_set= MyDataset(train_dataset_processed)
         val_set = MyDataset(valid_dataset_processed)
         
-        return training_set, val_set
+        # return training_set, val_set
 
         # # Creating the Training and Validation dataset for further creation of Dataloader
         # training_set = MyDataset(train_dataset_processed)
@@ -235,8 +224,10 @@ def myDataloader(
                         return_tensors="pt",
                         tokenize=False,
                         add_generation_prompt=True,
-                        return_dict=False
+                        return_dict=False,
+                        enable_thinking=False
                     )
+
                 questions.append(question)
                 ans = str(ans)
                 ans = ans.replace("0", "A")
@@ -293,10 +284,10 @@ def myDataloader(
 #test code
 if __name__ == "__main__":
     from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-    model_name = "Qwen/Qwen2.5-14B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    training_loader, val_loader = myDataloader("xsum", tokenizer, split_ratio=0.1, batch_size=1, max_length=512, seed=42,chat=True)
-    for batch in training_loader:
+    training_loader, val_loader = myDataloader("mmlu", tokenizer, split_ratio=0.1, batch_size=1, max_length=512, seed=42,chat=True)
+    for batch in val_loader:
         print(batch)
         break
     

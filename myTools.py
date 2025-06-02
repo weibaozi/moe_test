@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+import os
 def flip_bit_int8(tensor: torch.Tensor,bit_offset = 0) -> torch.Tensor:
     if tensor.dtype != torch.int8:
         raise ValueError("Input tensor must be of dtype torch.int8")
@@ -66,7 +68,7 @@ def search_bit_inRange(data, grad, lower_bound,upper_bound ):
             tmp = min(tmp)
         # print(tmp)
         if tmp == data:
-            print("No change")
+            # print("No change")
             return None
         else:
             return tmp
@@ -95,3 +97,108 @@ def set_param_element_weight(model,param_name,index, value):
                 print(f"setting {name} at index {row_index},{col_index} from {param.data[row_index, col_index]} to {value}")
                 param.data[row_index, col_index] = value
     
+def plot_grad_distribution(model, save_dir="output/distribution"):
+    """
+    Plots the gradient distribution of each parameter in the model.
+
+    Args:
+        model (torch.nn.Module): The trained PyTorch model.
+        save_dir (str): Directory to save the plots.
+
+    Returns:
+        None
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad = param.grad.detach().cpu().float().numpy().flatten()
+            if grad.size == 0:
+                continue
+
+            plt.hist(grad, bins=150, alpha=0.6)
+            plt.title(f"Gradient Distribution: {name}")
+            plt.xlabel("Gradient value")
+            plt.ylabel("Frequency")
+            plt.grid(True)
+
+            min_val = np.min(grad)
+            max_val = np.max(grad)
+            plt.axvline(min_val, color='r', linestyle='dashed', linewidth=1)
+            plt.axvline(max_val, color='g', linestyle='dashed', linewidth=1)
+            plt.text(min_val, 0, f'Min: {min_val:.4e}', color='red', fontsize=6)
+            plt.text(max_val, 0, f'Max: {max_val:.4e}', color='green', fontsize=6)
+
+            filename = os.path.join(save_dir, f"{name.replace('.', '_')}.png")
+            plt.savefig(filename)
+            plt.clf()
+def plot_weight_distribution(model, save_dir="output/distribution"):
+    """
+    Plots the weight distribution of each parameter in the model.
+
+    Args:
+        model (torch.nn.Module): The trained PyTorch model.
+        save_dir (str): Directory to save the plots.
+
+    Returns:
+        None
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    for name, param in model.named_parameters():
+        if param is not None:
+            weights = param.detach().cpu().float().numpy().flatten()
+            if weights.size == 0:
+                continue
+
+            plt.hist(weights, bins=150, alpha=0.6)
+            plt.title(f"Weight Distribution: {name}")
+            plt.xlabel("Weight value")
+            plt.ylabel("Frequency")
+            plt.grid(True)
+
+            min_val = np.min(weights)
+            max_val = np.max(weights)
+            plt.axvline(min_val, color='r', linestyle='dashed', linewidth=1)
+            plt.axvline(max_val, color='g', linestyle='dashed', linewidth=1)
+            plt.text(min_val, 0, f'Min: {min_val:.4e}', color='red', fontsize=6)
+            plt.text(max_val, 0, f'Max: {max_val:.4e}', color='green', fontsize=6)
+
+            filename = os.path.join(save_dir, f"{name.replace('.', '_')}.png")
+            plt.savefig(filename)
+            plt.clf()
+
+def plot_overall_grad_distribution(model, save_path="output/overall_grad.png"):
+    grads = []
+
+    for param in model.parameters():
+        if param.grad is not None:
+            grad = param.grad.detach().cpu().float().numpy().flatten()
+            if grad.size > 0 and not np.all(grad == 0):
+                grads.append(grad)
+
+    if not grads:
+        print("No gradients found.")
+        return
+
+    all_grads = np.concatenate(grads)
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    plt.hist(all_grads, bins=200, alpha=0.75)
+    plt.title("Overall Gradient Distribution")
+    plt.xlabel("Gradient Value")
+    plt.ylabel("Frequency")
+    plt.grid(True)
+
+    min_val, max_val = np.min(all_grads), np.max(all_grads)
+    plt.axvline(min_val, color='r', linestyle='dashed', linewidth=1)
+    plt.axvline(max_val, color='g', linestyle='dashed', linewidth=1)
+    plt.text(min_val, 0, f'Min: {min_val:.2e}', color='red', fontsize=6)
+    plt.text(max_val, 0, f'Max: {max_val:.2e}', color='green', fontsize=6)
+
+    plt.savefig(save_path)
+    plt.clf()
+    del grads
